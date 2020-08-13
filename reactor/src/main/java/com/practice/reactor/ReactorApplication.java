@@ -4,14 +4,19 @@ import org.reactivestreams.Subscription;
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class ReactorApplication {
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {
 
 
         System.out.println(Thread.currentThread().getName());
@@ -126,6 +131,213 @@ public class ReactorApplication {
                 }, (state) -> System.out.println("state: " + state));
         fluxSeven.subscribe(System.out::println);
         System.out.println();
+
+
+        //스케줄러를 통하여 스레드를 할당하여 Mono 사용
+
+        final Mono<String> mono = Mono.just("hello ");
+        Thread t = new Thread(() -> mono
+                .map(msg -> msg + "thread ")
+                .subscribe(v ->
+                        System.out.println(v + Thread.currentThread().getName())
+                )
+        );
+
+        t.start();
+        t.join();
+        System.out.println();
+
+        //SynchronousSink는 콜백 호출당 최대 한번의 next를 보낼수 있다. 콜백 안에서 next(), next() 두번사용이 안된다.
+        Flux<String> alphabet = Flux.just(-1, 30, 13, 9, 20)
+                .handle((i, sink) -> {
+                    String letter = alphabet(i);
+                    if (letter != null)
+                        sink.next(letter);
+                });
+
+        alphabet.subscribe(System.out::println);
+
+
+        //메인 쓰레드가 아닌 별도의 쓰레드를 생성하여 할당
+//        Flux.interval(Duration.ofMillis(300), Schedulers.newSingle("test"))
+//                .subscribe((s) -> {
+//                    System.out.println(Thread.currentThread().getName());
+//                });
+
+        alphabet.subscribe(System.out::println);
+
+
+        System.out.println();
+        System.out.println();
+
+        Scheduler s = Schedulers.newParallel("parallel-scheduler", 4);
+
+        //publishOn을 이용하게 된다면 다음 체인의 발행자는 스케줄러가 생성한 쓰레드에서 동작하게 된다.
+        final Flux<String> fluxTen = Flux
+                .range(1, 5)
+                .map(i -> {
+                    System.out.println("fluxTen " + Thread.currentThread().getName());
+                    return 10 + i;
+                })
+                .publishOn(s)
+                .map(i -> {
+                    System.out.println("fluxTen " + Thread.currentThread().getName());
+                    return "value " + i;
+                });
+
+        fluxTen.subscribe(System.out::println);
+        System.out.println();
+        System.out.println();
+        System.out.println();
+
+        Scheduler s2 = Schedulers.newParallel("parallel-scheduler-Two", 4);
+
+        final Flux<String> fluxNine = Flux
+                .range(1, 5)
+                .map(i -> {
+                    System.out.println("fluxNine " + Thread.currentThread().getName());
+                    return 10 + i;
+                })
+                .publishOn(s2)
+                .map(i -> {
+                    System.out.println("fluxNine " + Thread.currentThread().getName());
+                    return "value " + i;
+                });
+
+        fluxNine.subscribe(System.out::println);
+        System.out.println();
+        System.out.println();
+        System.out.println();
+
+
+        Flux.just(1, 2, 0)
+                .map(i -> "100 / " + i + " = " + (100 / i))
+                .onErrorReturn("Divided by zero :(")
+                .subscribe(System.out::println);
+
+        System.out.println();
+        System.out.println();
+
+        //정상적으로 수행된다면 구독자의 첫번째 콜백이 실행, 중간에 익셉션 에러가 발생한다면 구독자의 두번째 콜백이 실행
+        Flux<String> errorFlux = Flux.range(1, 10)
+                .map(ReactorApplication::doSomethingDangerous)
+                .map(ReactorApplication::doSecondTransform);
+        errorFlux.subscribe(value -> System.out.println("RECEIVED " + value),
+                error -> System.err.println("CAUGHT " + error)
+        );
+
+//        우의 예제를 try-catch로 만든다면 아래와 같다.
+//        try {
+//            for (int i = 1; i < 11; i++) {
+//                String v1 = doSomethingDangerous(i);
+//                String v2 = doSecondTransform(v1);
+//                System.out.println("RECEIVED " + v2);
+//            }
+//        } catch (Throwable t) {
+//            System.err.println("CAUGHT " + t);
+//        }
+
+        //에러를 조건에 맞는다면 복구할 수 있다.
+        Flux.just(9)
+                .map(ReactorApplication::doSomethingDangerous)
+                .onErrorReturn(e -> e.getMessage().equals("boom10"), "recovered10")
+                .subscribe(System.out::println);
+
+//        위의 예제를 Try-catch로 구현한다면 아래와 같다.
+//        String v1;
+//        try {
+//            v1 = callExternalService("key1");
+//        }
+//        catch (Throwable error) {
+//            v1 = getFromCache("key1");
+//        }
+//
+//        String v2;
+//        try {
+//            v2 = callExternalService("key2");
+//        }
+//        catch (Throwable error) {
+//            v2 = getFromCache("key2");
+//        }
+
+        //메서드로 처리
+//        Flux.just("timeout1", "unknown", "key2")
+//                .flatMap(k -> callExternalService(k)
+//                        .onErrorResume(error -> {
+//                            if (error instanceof TimeoutException)
+//                                return getFromCache(k);
+//                            else if (error instanceof UnknownKeyException)
+//                                return registerNewEntry(k, "DEFAULT");
+//                            else
+//                                return Flux.error(error);
+//                        })
+//                );
+
+
+//      에러가 발생하면 모든 구독자가 멈춘다. retry()를 이용해여 재구독(재시도)을 할 수 있다.
+        Flux.interval(Duration.ofMillis(250))
+                .map(input -> {
+                    if (input < 3) return "tick " + input;
+                    throw new RuntimeException("boom");
+                })
+                .retry(1)
+                .elapsed()
+                .subscribe(System.out::println, System.err::println);
+
+        Thread.sleep(2100);
+
+
+        System.out.println();
+        Flux<String> retryFlux = Flux
+                .<String>error(new IllegalArgumentException())
+                .doOnError(System.out::println)
+                .retryWhen(Retry.from(companion ->
+                        companion.take(3)));
+
+
+        AtomicInteger errorCount = new AtomicInteger();
+        AtomicInteger transientHelper = new AtomicInteger();
+        Flux<Integer> transientFlux = Flux.<Integer>generate(sink -> {
+            int i = transientHelper.getAndIncrement();
+            if (i == 10) {
+                sink.next(i);
+                sink.complete();
+            }
+            else if (i % 3 == 0) {
+                sink.next(i);
+            }
+            else {
+                System.out.println(i);
+                sink.error(new IllegalStateException("Transient error at " + i));
+            }
+        })
+                .doOnError(e -> errorCount.incrementAndGet());
+
+        transientFlux.retryWhen(Retry.max(2).transientErrors(true))
+                .blockLast();
+
+        System.out.println(errorCount);
+    }
+
+    private static String doSecondTransform(String v) {
+        return v + " * " + v;
+    }
+
+    private static String doSomethingDangerous(int v) {
+
+        if (v == 9) {
+            throw new RuntimeException("boom10");
+        }
+
+        return v + "1";
+    }
+
+    public static String alphabet(int letterNumber) {
+        if (letterNumber < 1 || letterNumber > 26) {
+            return null;
+        }
+        int letterIndexAscii = 'A' + letterNumber - 1;
+        return "" + (char) letterIndexAscii;
     }
 
 }
