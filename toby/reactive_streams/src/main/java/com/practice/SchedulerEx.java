@@ -17,7 +17,9 @@ public class SchedulerEx {
               public void request(long n) {
                   log.warn("request()");
                   sub.onNext(1);
+                  log.warn("onNext 1");
                   sub.onNext(2);
+                  log.warn("onNext 2");
                   sub.onNext(3);
                   sub.onNext(4);
                   sub.onNext(5);
@@ -37,8 +39,8 @@ public class SchedulerEx {
         };
 
         Publisher<Integer> pubOnPub = sub -> {
-          pub.subscribe(new Subscriber<Integer>() {
-              ExecutorService es = Executors.newSingleThreadExecutor();
+            subOnPub.subscribe(new Subscriber<Integer>() {
+              final ExecutorService es = Executors.newSingleThreadExecutor();
 
               @Override
               public void onSubscribe(Subscription s) {
@@ -53,16 +55,18 @@ public class SchedulerEx {
               @Override
               public void onError(Throwable t) {
                   es.submit(() -> sub.onError(t));
+                  es.shutdown();
               }
 
               @Override
               public void onComplete() {
-                  es.submit(() -> sub.onComplete());
+                  es.submit(sub::onComplete);
+                  es.shutdown();
               }
           });
         };
 
-        subOnPub.subscribe(new Subscriber<Integer>() {
+        pubOnPub.subscribe(new Subscriber<Integer>() {
             @Override
             public void onSubscribe(Subscription s) {
                 log.warn("onSubscribe");
